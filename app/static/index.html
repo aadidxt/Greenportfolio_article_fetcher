@@ -1,0 +1,459 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Green Portfolio media monitoring dashboard and CMS" />
+    <title>Green Portfolio Media Monitor</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Text:ital@0;1&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <a class="brand" href="#dashboard" aria-label="Media Monitor home">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span><strong>GREEN</strong><br />PORTFOLIO</span>
+        </a>
+        <nav aria-label="Main navigation">
+          <a class="nav-item active" href="#dashboard" data-route="dashboard"><span class="nav-icon">⌂</span>Dashboard</a>
+          <a class="nav-item" href="#articles" data-route="articles"><span class="nav-icon">▤</span>Articles</a>
+          <a class="nav-item" href="#email" data-route="email"><span class="nav-icon">✉</span>Email Settings</a>
+          <a class="nav-item" href="#automation" data-route="automation"><span class="nav-icon">⚙</span>Automation Settings</a>
+        </nav>
+        <div class="sidebar-note">
+          <span class="eyebrow">AUTOMATION</span>
+          <strong id="sidebar-schedule-summary">Monday · 09:00</strong>
+          <small id="sidebar-timezone">Asia/Kolkata (IST)</small>
+          <span class="schedule-state"><i></i><b id="scheduler-state">Scheduler active</b></span>
+        </div>
+        <div class="sidebar-footer">Internal media intelligence</div>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <p class="eyebrow" id="topbar-eyebrow">MEDIA INTELLIGENCE / CMS</p>
+            <h1 id="topbar-title">Coverage, <em>clearly tracked.</em></h1>
+            <p class="intro" id="topbar-intro">New coverage for Green Portfolio, Divam Sharma and Anuj Jain — discovered, verified and archived.</p>
+          </div>
+          <div class="top-actions">
+            <div class="system-pill"><span></span><div><small>SYSTEM STATUS</small><strong id="system-status">Loading</strong></div></div>
+            <div class="export-wrap">
+              <button class="button button-secondary" id="export-toggle" aria-expanded="false">Export <span>⌄</span></button>
+              <div class="export-menu" id="export-menu" hidden>
+                <div>
+                  <strong>Latest successful fetch</strong>
+                  <a href="/api/exports/new.xlsx">Excel .xlsx</a>
+                  <a href="/api/exports/new.csv">CSV .csv</a>
+                </div>
+                <div>
+                  <strong>Complete appended dataset</strong>
+                  <a href="/api/exports/all.xlsx">Excel .xlsx</a>
+                  <a href="/api/exports/all.csv">CSV .csv</a>
+                </div>
+              </div>
+            </div>
+            <button class="button button-primary" id="fetch-button"><span class="refresh-icon">↻</span> Fetch new articles</button>
+          </div>
+        </header>
+
+        <section class="fetch-strip" id="fetch-progress" hidden aria-live="polite">
+          <div>
+            <span class="pulse"></span>
+            <strong id="progress-title">Fetch in progress</strong>
+            <small id="progress-copy">Searching trusted sources…</small>
+          </div>
+          <ol id="progress-steps">
+            <li>Searching</li><li>Collecting</li><li>Extracting</li><li>Deduplicating</li><li>Saving</li><li>Complete</li>
+          </ol>
+        </section>
+
+        <!-- VIEW 1: DASHBOARD -->
+        <section class="cms-view active" id="view-dashboard">
+          <div class="section-title-wrap">
+            <h2 class="section-heading">System <em>overview</em></h2>
+            <span class="eyebrow">LIVE INTELLIGENCE METRICS</span>
+          </div>
+
+          <div class="stats-grid stats-grid-6" aria-label="CMS Overview statistics">
+            <article class="stat-card primary-stat">
+              <div class="stat-label"><span>01</span> Articles</div>
+              <strong id="dash-total-articles">—</strong>
+              <p>Total Articles in datastore</p>
+              <div class="mini-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            </article>
+            <article class="stat-card">
+              <div class="stat-label"><span>02</span> Latest Fetch</div>
+              <strong class="date-stat" id="dash-latest-fetch">Never</strong>
+              <p id="dash-latest-fetch-sub">Waiting for first run</p>
+              <span class="trend neutral">INCREMENTAL</span>
+            </article>
+            <article class="stat-card">
+              <div class="stat-label"><span>03</span> New Articles</div>
+              <strong id="dash-new-articles">—</strong>
+              <p>Discovered in latest run</p>
+              <span class="trend">NEW COVERAGE</span>
+            </article>
+            <article class="stat-card">
+              <div class="stat-label"><span>04</span> Email Recipients</div>
+              <strong id="dash-recipients">—</strong>
+              <p>Active report subscribers</p>
+              <span class="trend neutral">DISTRIBUTION</span>
+            </article>
+            <article class="stat-card">
+              <div class="stat-label"><span>05</span> Automation</div>
+              <div class="card-status-line">
+                <span id="dash-automation-status" class="pill-badge pill-on">ON</span>
+              </div>
+              <p id="dash-automation-freq">Every Monday at 9:00 AM</p>
+              <span class="trend">CRON JOB</span>
+            </article>
+            <article class="stat-card">
+              <div class="stat-label"><span>06</span> Next Run</div>
+              <strong class="date-stat" id="dash-next-run">—</strong>
+              <p id="dash-next-run-sub">Calculated fire time</p>
+              <span class="trend">SCHEDULED</span>
+            </article>
+          </div>
+
+          <div class="lower-grid" id="history">
+            <article class="panel history-panel">
+              <div class="panel-heading compact">
+                <div><p class="eyebrow">RUN LOG</p><h2>Fetch <em>history</em></h2></div>
+                <span class="append-only">APPEND ONLY</span>
+              </div>
+              <div class="table-wrap history-table-wrap">
+                <table class="history-table">
+                  <thead><tr><th>Fetch date</th><th>Status</th><th>New</th><th>Duplicates</th><th>Errors</th></tr></thead>
+                  <tbody id="history-rows"><tr><td colspan="5" class="loading-row">Loading fetch history…</td></tr></tbody>
+                </table>
+              </div>
+            </article>
+            <aside class="panel next-run-card">
+              <p class="eyebrow">NEXT AUTOMATION</p>
+              <div class="calendar-icon"><span id="next-run-cal-day">MON</span><strong id="next-run-cal-date">09</strong></div>
+              <h3 id="next-run-date">Next Monday</h3>
+              <p id="next-run-time">09:00 AM · Asia/Kolkata</p>
+              <div class="pipeline-line"><span>Search</span><i></i><span>Verify</span><i></i><span>Append</span><i></i><span>Email</span></div>
+              <small>Runs server-side even when this dashboard is closed.</small>
+            </aside>
+          </div>
+        </section>
+
+        <!-- VIEW 2: ARTICLES -->
+        <section class="cms-view" id="view-articles" hidden>
+          <div class="articles-header-bar">
+            <div>
+              <p class="eyebrow">COMPLETE DATASET</p>
+              <h2 class="section-heading">All <em>articles</em></h2>
+            </div>
+            <div class="total-articles-pill">
+              <span>TOTAL ARTICLES</span>
+              <strong id="articles-total-count">—</strong>
+            </div>
+          </div>
+
+          <section class="panel articles-panel">
+            <div class="filters">
+              <label class="search-box">
+                <span>⌕</span>
+                <input id="search-input" type="search" placeholder="Search titles, descriptions or publishers" />
+              </label>
+              <label>
+                <span>Publisher</span>
+                <select id="publisher-filter"><option value="">All publishers</option></select>
+              </label>
+              <label>
+                <span>Keyword</span>
+                <select id="keyword-filter">
+                  <option value="">All monitored terms</option>
+                  <option>Green Portfolio</option>
+                  <option>Divam Sharma</option>
+                  <option>Anuj Jain</option>
+                </select>
+              </label>
+              <label><span>From</span><input id="date-from" type="date" /></label>
+              <label><span>To</span><input id="date-to" type="date" /></label>
+              <button class="clear-button" id="clear-filters">Clear</button>
+            </div>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th><button data-sort="publisher">Publisher Website <span>↕</span></button></th>
+                    <th><button data-sort="published_at">Published Date <span>↓</span></button></th>
+                    <th><button data-sort="title">Title <span>↕</span></button></th>
+                    <th>Description</th>
+                    <th>URL</th>
+                  </tr>
+                </thead>
+                <tbody id="article-rows"><tr><td colspan="5" class="loading-row">Loading media coverage…</td></tr></tbody>
+              </table>
+            </div>
+            <div class="empty-state" id="empty-state" hidden>
+              <span>⌁</span><h3>No coverage found</h3><p>Adjust the filters or run a new incremental fetch.</p>
+            </div>
+            <div class="pagination">
+              <span id="page-summary">Showing 0 articles</span>
+              <div>
+                <button id="prev-page" aria-label="Previous page">←</button>
+                <span id="page-number">1 / 1</span>
+                <button id="next-page" aria-label="Next page">→</button>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <!-- VIEW 3: EMAIL SETTINGS -->
+        <section class="cms-view" id="view-email" hidden>
+          <div class="articles-header-bar">
+            <div>
+              <p class="eyebrow">REPORT DISTRIBUTION</p>
+              <h2 class="section-heading">Email <em>recipients</em></h2>
+              <p class="section-sub">Configure who receives the weekly article report. Reports are automatically sent to all active recipients.</p>
+            </div>
+            <div>
+              <button class="button button-primary" id="btn-add-recipient">+ Add Recipient</button>
+            </div>
+          </div>
+
+          <section class="panel email-panel">
+            <div class="panel-heading compact">
+              <div>
+                <span class="eyebrow">ACTIVE SUBSCRIBERS</span>
+                <h3 class="panel-subheading">Configured Recipients</h3>
+              </div>
+              <div class="recipients-count-badge">
+                <span id="recipients-active-count">0</span> active recipient(s)
+              </div>
+            </div>
+
+            <div class="table-wrap">
+              <table class="cms-table" id="recipients-table">
+                <thead>
+                  <tr>
+                    <th>Email</th>
+                    <th>Status</th>
+                    <th>Added</th>
+                    <th style="text-align: right;">Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="recipient-rows">
+                  <tr><td colspan="4" class="loading-row">Loading email recipients…</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="empty-state" id="recipients-empty" hidden>
+              <span>✉</span>
+              <h3>No email recipients configured</h3>
+              <p>Add email addresses to receive the automated weekly XLSX reports.</p>
+            </div>
+          </section>
+        </section>
+
+        <!-- VIEW 4: AUTOMATION SETTINGS -->
+        <section class="cms-view" id="view-automation" hidden>
+          <div class="articles-header-bar">
+            <div>
+              <p class="eyebrow">TASK SCHEDULER</p>
+              <h2 class="section-heading">Automation <em>schedule</em></h2>
+              <p class="section-sub">Configure when the automated media-monitoring and report delivery executes.</p>
+            </div>
+          </div>
+
+          <div class="schedule-grid">
+            <section class="panel schedule-panel">
+              <form id="automation-form" class="schedule-form">
+                <div class="form-row toggle-row">
+                  <div>
+                    <strong>Automation Status</strong>
+                    <p class="form-help">Enable or pause the background automated article fetching engine.</p>
+                  </div>
+                  <label class="switch-label">
+                    <input type="checkbox" id="auto-enabled-toggle" checked />
+                    <span class="switch-slider"></span>
+                    <b id="auto-enabled-label">Automation: ON</b>
+                  </label>
+                </div>
+
+                <div class="form-divider"></div>
+
+                <div class="form-group">
+                  <label for="auto-frequency" class="form-label">Frequency</label>
+                  <select id="auto-frequency" class="form-control">
+                    <option value="weekly">Weekly (Recommended)</option>
+                    <option value="daily">Daily</option>
+                    <option value="custom">Custom (Cron)</option>
+                  </select>
+                  <small class="form-help">Determines how often the crawler checks for new articles.</small>
+                </div>
+
+                <div class="form-group" id="group-day-of-week">
+                  <label for="auto-day-of-week" class="form-label">Day of Week</label>
+                  <select id="auto-day-of-week" class="form-control">
+                    <option value="mon">Monday</option>
+                    <option value="tue">Tuesday</option>
+                    <option value="wed">Wednesday</option>
+                    <option value="thu">Thursday</option>
+                    <option value="fri">Friday</option>
+                    <option value="sat">Saturday</option>
+                    <option value="sun">Sunday</option>
+                  </select>
+                  <small class="form-help">The day on which weekly media monitoring runs.</small>
+                </div>
+
+                <div class="form-group" id="group-time">
+                  <label class="form-label">Execution Time</label>
+                  <div class="time-picker-grid">
+                    <div>
+                      <label for="auto-hour" class="sub-label">Hour</label>
+                      <select id="auto-hour" class="form-control">
+                        <option value="1">01</option><option value="2">02</option><option value="3">03</option>
+                        <option value="4">04</option><option value="5">05</option><option value="6">06</option>
+                        <option value="7">07</option><option value="8">08</option><option value="9" selected>09</option>
+                        <option value="10">10</option><option value="11">11</option><option value="12">12</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label for="auto-minute" class="sub-label">Minute (00–59)</label>
+                      <input
+                        type="number"
+                        id="auto-minute"
+                        class="form-control"
+                        min="0"
+                        max="59"
+                        step="1"
+                        value="00"
+                        placeholder="00"
+                        list="minute-suggestions"
+                      />
+                      <datalist id="minute-suggestions">
+                        <option value="00">00</option>
+                        <option value="05">05</option>
+                        <option value="10">10</option>
+                        <option value="15">15</option>
+                        <option value="20">20</option>
+                        <option value="25">25</option>
+                        <option value="30">30</option>
+                        <option value="35">35</option>
+                        <option value="40">40</option>
+                        <option value="45">45</option>
+                        <option value="50">50</option>
+                        <option value="55">55</option>
+                      </datalist>
+                    </div>
+                    <div>
+                      <label for="auto-ampm" class="sub-label">AM / PM</label>
+                      <select id="auto-ampm" class="form-control">
+                        <option value="AM" selected>AM</option>
+                        <option value="PM">PM</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="form-group" id="group-custom-cron" hidden>
+                  <label for="auto-cron" class="form-label">Cron Expression</label>
+                  <input type="text" id="auto-cron" class="form-control" placeholder="0 9 * * 1" />
+                  <small class="form-help">Standard 5-part cron syntax (minute hour day-of-month month day-of-week).</small>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Timezone</label>
+                  <div class="timezone-display-pill">
+                    <span class="tz-globe">🌐</span>
+                    <strong>Asia/Kolkata (IST)</strong>
+                    <small>Default system timezone</small>
+                  </div>
+                  <input type="hidden" id="auto-timezone" value="Asia/Kolkata" />
+                </div>
+
+                <div class="form-actions">
+                  <button type="button" class="button button-primary" id="btn-save-schedule">Save Schedule</button>
+                </div>
+              </form>
+            </section>
+
+            <aside class="panel schedule-summary-panel">
+              <p class="eyebrow">AUTOMATION STATUS</p>
+              <h3 class="panel-subheading">Current Active Schedule</h3>
+              <div class="schedule-banner-box">
+                <div class="schedule-banner-icon">⏱</div>
+                <div>
+                  <small>NEXT SCHEDULED RUN</small>
+                  <strong id="schedule-next-run-text">Monday, 09:00 AM IST</strong>
+                </div>
+              </div>
+              <ul class="schedule-notes-list">
+                <li><span>✓</span> Changes take effect immediately on the server.</li>
+                <li><span>✓</span> Automated runs discover new coverage and append to datasets.</li>
+                <li><span>✓</span> Weekly email report is sent to all active email recipients.</li>
+                <li><span>✓</span> Google Sheets (if enabled) syncs automatically after each run.</li>
+              </ul>
+            </aside>
+          </div>
+        </section>
+
+        <footer>
+          <span>Green Portfolio Media Monitor</span>
+          <span>CMS & Media Intelligence · Append-only</span>
+        </footer>
+      </main>
+    </div>
+
+    <!-- DIALOG: RECIPIENT ADD/EDIT -->
+    <dialog id="recipient-dialog">
+      <form id="recipient-form" method="dialog">
+        <button type="button" class="dialog-close" id="recipient-dialog-close" aria-label="Close">×</button>
+        <p class="eyebrow" id="recipient-dialog-eyebrow">EMAIL RECIPIENT</p>
+        <h2 id="recipient-dialog-title">Add recipient</h2>
+        <p>Configured recipients receive the weekly media coverage report.</p>
+
+        <input type="hidden" id="recipient-edit-id" value="" />
+
+        <label for="recipient-email-input">
+          <span>Email address</span>
+          <input id="recipient-email-input" type="email" placeholder="name@example.com" required />
+        </label>
+
+        <label class="checkbox-label" style="margin-top: 18px;">
+          <input type="checkbox" id="recipient-active-checkbox" checked />
+          <span>Active (receive weekly reports)</span>
+        </label>
+
+        <div id="recipient-error-msg" class="dialog-error" hidden></div>
+
+        <div class="dialog-actions">
+          <button type="button" class="button button-secondary" id="recipient-dialog-cancel">Cancel</button>
+          <button type="submit" class="button button-primary" id="recipient-dialog-save">Save Recipient</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- DIALOG: ADMIN KEY ENTRY -->
+    <dialog id="admin-dialog">
+      <form method="dialog" id="admin-form">
+        <button class="dialog-close" value="cancel" aria-label="Close">×</button>
+        <p class="eyebrow">PROTECTED ACTION</p>
+        <h2>Enter your admin key</h2>
+        <p>The key is sent only to this server and retained for this browser session.</p>
+        <label>
+          <span>Admin API key</span>
+          <input id="admin-key" type="password" autocomplete="current-password" required />
+        </label>
+        <div class="dialog-actions">
+          <button class="button button-secondary" value="cancel">Cancel</button>
+          <button class="button button-primary" value="submit">Continue</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>

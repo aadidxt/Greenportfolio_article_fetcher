@@ -1,0 +1,21 @@
+name: Weekly media fetch
+
+on:
+  schedule:
+    # 09:00 Asia/Kolkata is 03:30 UTC year-round.
+    - cron: "30 3 * * 1"
+  workflow_dispatch:
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    env:
+      MEDIA_MONITOR_URL: ${{ secrets.MEDIA_MONITOR_URL }}
+      MEDIA_MONITOR_ADMIN_KEY: ${{ secrets.MEDIA_MONITOR_ADMIN_KEY }}
+    steps:
+      - name: Trigger the protected weekly fetch endpoint
+        if: ${{ env.MEDIA_MONITOR_URL != '' && env.MEDIA_MONITOR_ADMIN_KEY != '' }}
+        run: |
+          curl --fail-with-body --retry 3 --retry-all-errors \
+            -X POST "${MEDIA_MONITOR_URL%/}/api/jobs/weekly" \
+            -H "X-Admin-Key: ${MEDIA_MONITOR_ADMIN_KEY}"

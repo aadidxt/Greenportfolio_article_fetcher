@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+*.egg-info/
+.env
+data/
+*.db
+gp-home.html
+gp-home.css
+gp-styles.css
+green-portfolio-508010-beb28803160c.json
