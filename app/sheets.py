@@ -34,19 +34,53 @@ class GoogleSheetsStore:
         raw = self.settings.google_service_account_json.strip()
         if not raw:
             raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not configured")
-        
-        potential_path = Path(raw)
-        if not raw.startswith("{") and potential_path.is_file():
-            raw = potential_path.read_text(encoding="utf-8").strip()
-        elif not raw.startswith("{"):
+
+        # 1. If it starts with '{', it is raw JSON
+        if raw.startswith("{"):
             try:
-                raw = base64.b64decode(raw).decode("utf-8")
-            except Exception as exc:
-                raise RuntimeError("Google service-account JSON is not a valid file path, JSON string, or base64") from exc
+                value = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("Google service-account credentials are invalid JSON") from exc
+            if not isinstance(value, dict) or value.get("type") != "service_account":
+                raise RuntimeError("A Google service-account credential is required")
+            return value
+
+        # 2. Check if it is a file path (only short strings without newlines)
+        if len(raw) < 500 and "\n" not in raw:
+            try:
+                potential_path = Path(raw)
+                render_secret_path = Path("/etc/secrets") / potential_path.name
+                if potential_path.is_file():
+                    raw = potential_path.read_text(encoding="utf-8").strip()
+                elif render_secret_path.is_file():
+                    raw = render_secret_path.read_text(encoding="utf-8").strip()
+                elif raw.endswith(".json") or "/" in raw or "\\" in raw:
+                    raise RuntimeError(
+                        f"Google service-account file '{raw}' was not found on the server filesystem. "
+                        "Please paste the base64 string directly into GOOGLE_SERVICE_ACCOUNT_JSON."
+                    )
+            except OSError:
+                pass
+
+        # If a file was read and is now raw JSON
+        if raw.startswith("{"):
+            try:
+                value = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("Google service-account credentials are invalid JSON") from exc
+            if not isinstance(value, dict) or value.get("type") != "service_account":
+                raise RuntimeError("A Google service-account credential is required")
+            return value
+
+        # 3. Otherwise, it must be base64 encoded
         try:
-            value = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("Google service-account credentials are invalid JSON") from exc
+            decoded = base64.b64decode(raw).decode("utf-8")
+            value = json.loads(decoded)
+        except Exception as exc:
+            raise RuntimeError(
+                "Google service-account JSON is not a valid file path, JSON string, or base64"
+            ) from exc
+
         if not isinstance(value, dict) or value.get("type") != "service_account":
             raise RuntimeError("A Google service-account credential is required")
         return value
