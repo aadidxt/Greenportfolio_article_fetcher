@@ -3,7 +3,12 @@ from __future__ import annotations
 import logging
 import threading
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc
 from typing import Callable
 
 from .config import Settings
@@ -11,7 +16,7 @@ from .database import Database, isoformat, parse_iso, utc_now
 from .emailer import WeeklyEmailSender
 from .exporter import export_xlsx
 from .extractor import ArticleExtractor
-from .models import FetchCounters
+from .models import FetchCounters, SearchCandidate
 from .relevance import is_relevant
 from .search import InternetSearchService
 from .sheets import GoogleSheetsStore
@@ -77,6 +82,21 @@ class FetchPipeline:
                         counters.duplicates += 1
                         continue
                     seen_this_run.add(preliminary)
+                    known = self.database.find_by_normalized_url(preliminary)
+                    if known is not None:
+                        counters.duplicates += 1
+                        if not known.description.strip():
+                            refreshed = self.extractor.extract(candidate)
+                            if refreshed and refreshed.description.strip():
+                                self.database.update_description(
+                                    known.id, refreshed.description
+                                )
+                            else:
+                                self.database.record_extraction_failure(
+                                    known.id,
+                                    "Article body paragraph was not available during rediscovery",
+                                )
+                        continue
                     draft = self.extractor.extract(candidate)
                     if draft is None:
                         counters.failed_articles += 1
@@ -91,8 +111,14 @@ class FetchPipeline:
                     if not is_relevant(draft):
                         continue
                     counters.relevant_articles += 1
-                    if self.database.find_duplicate(draft):
+                    duplicate_id = self.database.find_duplicate(draft)
+                    if duplicate_id:
                         counters.duplicates += 1
+                        self.database.add_url_alias(duplicate_id, draft.normalized_url)
+                        if draft.description.strip():
+                            self.database.update_description(
+                                duplicate_id, draft.description
+                            )
                         continue
                     if self.database.insert_article(article_id(draft.normalized_url), draft, started_at):
                         counters.new_articles += 1
@@ -111,9 +137,13 @@ class FetchPipeline:
                 )
 
             self.database.update_fetch(fetch_id, stage="Saving", counters=counters)
-            all_articles = self.database.all_articles()
-            synchronized = self.sheets.append_articles(all_articles)
-            self.database.mark_synced(synchronized)
+            if hasattr(self.sheets, "reconcile"):
+                sync_result = self.sheets.reconcile(self.database)
+                synchronized = sync_result.get("synchronized_ids", [])
+            else:
+                all_articles = self.database.all_articles()
+                synchronized = self.sheets.append_articles(all_articles)
+                self.database.mark_synced(synchronized)
             sheets_status = (
                 "disabled" if getattr(self.sheets, "enabled", True) is False else "success"
             )
@@ -169,3 +199,50 @@ class FetchPipeline:
             raise
         finally:
             self._lock.release()
+
+    def backfill_descriptions(self, *, limit: int | None = None) -> dict[str, int | str]:
+        """Retry body extraction for historical rows without inserting articles."""
+        attempted = updated = failed = 0
+        for article in self.database.blank_description_articles(limit):
+            attempted += 1
+            candidate = SearchCandidate(
+                url=article.original_url or article.url,
+                title=article.title,
+                published_at=article.published_at,
+                publisher=article.publisher,
+                source=article.source or "description-backfill",
+            )
+            try:
+                draft = self.extractor.extract(candidate)
+                if draft and draft.description.strip():
+                    if self.database.update_description(article.id, draft.description):
+                        updated += 1
+                        continue
+                failed += 1
+                self.database.record_extraction_failure(
+                    article.id, "No meaningful article-body paragraph could be identified"
+                )
+            except Exception as exc:
+                failed += 1
+                logger.exception("Description backfill failed for %s", article.url)
+                self.database.record_extraction_failure(article.id, str(exc))
+
+        sync_status = "disabled"
+        try:
+            if hasattr(self.sheets, "reconcile"):
+                result = self.sheets.reconcile(self.database)
+                sync_status = str(result.get("status", "unknown"))
+            elif updated:
+                synchronized = self.sheets.append_articles(self.database.all_articles())
+                self.database.mark_synced(synchronized)
+                sync_status = "success"
+        except Exception:
+            logger.exception("Description backfill completed but Sheet synchronization failed")
+            sync_status = "failed"
+        return {
+            "status": "complete",
+            "attempted": attempted,
+            "updated": updated,
+            "failed": failed,
+            "sheet_sync_status": sync_status,
+        }

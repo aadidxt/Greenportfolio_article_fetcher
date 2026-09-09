@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
@@ -48,7 +53,11 @@ def trigger_from_schedule(schedule: dict[str, Any], default_timezone: str = "Asi
         return CronTrigger(day_of_week=day_of_week, hour=hour, minute=minute, timezone=tz)
 
 
-def format_next_run(next_fire: datetime | None, timezone_name: str = "Asia/Kolkata") -> str | None:
+def format_next_run(
+    next_fire: datetime | None,
+    timezone_name: str = "Asia/Kolkata",
+    frequency: str = "weekly",
+) -> str | None:
     if not next_fire:
         return None
     try:
@@ -56,10 +65,11 @@ def format_next_run(next_fire: datetime | None, timezone_name: str = "Asia/Kolka
         local_time = next_fire.astimezone(tz)
     except Exception:
         local_time = next_fire
-    # Format e.g.: "Monday, 09:00 AM IST"
-    weekday_name = local_time.strftime("%A")
     time_str = local_time.strftime("%I:%M %p")
     tz_abbr = local_time.tzname() or timezone_name
+    if str(frequency).lower() in ("daily", "custom"):
+        return f"{time_str} {tz_abbr}"
+    weekday_name = local_time.strftime("%A")
     return f"{weekday_name}, {time_str} {tz_abbr}"
 
 

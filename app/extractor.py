@@ -3,7 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc
 from html import unescape
 from urllib.parse import urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
@@ -63,6 +68,11 @@ class ArticleExtractor:
                 url=normalized,
                 normalized_url=normalized,
                 source=candidate.source,
+                canonical_url=normalized,
+                original_url=candidate.url,
+                normalized_title=" ".join(
+                    self._provider_title(candidate.title, candidate.publisher).casefold().split()
+                ),
             )
 
         soup = BeautifulSoup(response, "html.parser")
@@ -90,14 +100,18 @@ class ArticleExtractor:
         if not title or not published:
             return None
 
+        clean_title = _squash(title)[:1000]
         return ArticleDraft(
             publisher=_squash(publisher)[:200],
             published_at=published,
-            title=_squash(title)[:1000],
-            description=self._first_paragraph(soup)[:5000],
+            title=clean_title,
+            description=self._first_paragraph(soup, json_ld)[:5000],
             url=normalized,
             normalized_url=normalized,
             source=candidate.source,
+            canonical_url=normalized,
+            original_url=candidate.url,
+            normalized_title=" ".join(clean_title.casefold().split()),
         )
 
     def _safe_get(self, url: str) -> tuple[bytes, str]:
@@ -239,22 +253,152 @@ class ArticleExtractor:
                 return parsed
         return None
 
-    @staticmethod
-    def _first_paragraph(soup: BeautifulSoup) -> str:
-        boilerplate = ("subscribe", "sign up", "advertisement", "read more", "updated:")
-        for selector in (
-            "article [itemprop='articleBody'] p",
-            "article .article-body p",
-            "article .story-content p",
+    @classmethod
+    def _first_paragraph(cls, soup: BeautifulSoup, json_ld: list[dict]) -> str:
+        """Return the first defensible paragraph from the actual article body."""
+        explicit_selectors = (
+            "[itemprop='articleBody'] p",
+            "article [data-component*='body' i] p",
+            "article [class*='article-body' i] p",
+            "article [class*='article__body' i] p",
+            "article [class*='story-body' i] p",
+            "article [class*='story-content' i] p",
+            "article [class*='entry-content' i] p",
+            "article [class*='post-content' i] p",
+            "article [class*='article-content' i] p",
+            "article [id*='article-body' i] p",
+            "article [id*='story-body' i] p",
+            "article > p",
+        )
+        found = cls._first_valid_from_selectors(soup, explicit_selectors)
+        if found:
+            return found
+
+        # Schema.org articleBody is body content; description/SEO fields are
+        # deliberately never considered.
+        for item in json_ld:
+            body = item.get("articleBody")
+            if not isinstance(body, str) or not body.strip():
+                continue
+            body_soup = BeautifulSoup(body, "html.parser")
+            blocks = [
+                _squash(node.get_text(" ", strip=True))
+                for node in body_soup.select("p")
+            ]
+            if not blocks:
+                blocks = [_squash(part) for part in re.split(r"[\r\n]+", body)]
+            for text in blocks:
+                if cls._meaningful_paragraph(text):
+                    return text
+
+        publisher_selectors = (
+            "main [class*='article-body' i] p",
+            "main [class*='article-content' i] p",
+            "main [class*='story-body' i] p",
+            "main [class*='story-content' i] p",
+            "main [class*='entry-content' i] p",
+            "main [class*='post-content' i] p",
+            "main [class*='content-body' i] p",
+            "[role='main'] [class*='article' i] p",
+            "[data-testid*='article' i] p",
+            "[data-testid*='story' i] p",
             "article p",
-            "main p",
-        ):
-            for paragraph in soup.select(selector):
+        )
+        found = cls._first_valid_from_selectors(soup, publisher_selectors)
+        if found:
+            return found
+
+        container = cls._best_content_container(soup)
+        if container is not None:
+            for paragraph in container.find_all("p"):
                 text = _squash(paragraph.get_text(" ", strip=True))
-                lowered = text.casefold()
-                if len(text) >= 40 and not any(text.startswith(word) for word in boilerplate):
+                if cls._meaningful_paragraph(text, paragraph):
                     return text
         return ""
+
+    @classmethod
+    def _first_valid_from_selectors(
+        cls, soup: BeautifulSoup, selectors: tuple[str, ...]
+    ) -> str:
+        seen: set[int] = set()
+        for selector in selectors:
+            for paragraph in soup.select(selector):
+                marker = id(paragraph)
+                if marker in seen:
+                    continue
+                seen.add(marker)
+                text = _squash(paragraph.get_text(" ", strip=True))
+                if cls._meaningful_paragraph(text, paragraph):
+                    return text
+        return ""
+
+    @staticmethod
+    def _meaningful_paragraph(text: str, node: Tag | None = None) -> bool:
+        if len(text) < 50 or len(text.split()) < 8:
+            return False
+        lowered = text.casefold().strip()
+        if lowered.startswith(
+            (
+                "advertisement", "subscribe", "sign up", "sign in", "log in",
+                "read more", "also read", "related:", "recommended", "cookie",
+                "privacy policy", "all rights reserved", "follow us", "share this",
+                "download our app", "updated:", "published:", "written by", "edited by",
+            )
+        ):
+            return False
+        if node is not None:
+            ancestry = " ".join(
+                " ".join(
+                    [str(parent.get("id", "")), *map(str, parent.get("class", []))]
+                )
+                for parent in [node, *list(node.parents)[:5]]
+                if isinstance(parent, Tag)
+            ).casefold()
+            negative = (
+                "advert", "promo", "related", "recommend", "comment", "footer",
+                "caption", "newsletter", "subscribe", "author-bio", "byline",
+                "social", "share", "cookie", "navigation", "breadcrumb",
+            )
+            if any(token in ancestry for token in negative):
+                return False
+            link_text = sum(
+                len(_squash(link.get_text(" ", strip=True))) for link in node.find_all("a")
+            )
+            if link_text / max(1, len(text)) > 0.45:
+                return False
+        return True
+
+    @classmethod
+    def _best_content_container(cls, soup: BeautifulSoup) -> Tag | None:
+        candidates: list[tuple[float, Tag]] = []
+        positive = ("article", "story", "entry", "post", "content", "body", "main")
+        negative = (
+            "nav", "footer", "aside", "related", "recommend", "comment", "promo",
+            "advert", "sidebar", "author", "share", "social", "cookie",
+        )
+        for node in soup.find_all(("article", "main", "section", "div")):
+            valid: list[str] = []
+            for paragraph in node.find_all("p", recursive=True):
+                text = _squash(paragraph.get_text(" ", strip=True))
+                if cls._meaningful_paragraph(text, paragraph):
+                    valid.append(text)
+            if not valid:
+                continue
+            identity = " ".join(
+                [str(node.get("id", "")), *map(str, node.get("class", []))]
+            ).casefold()
+            score = float(sum(min(len(text), 1000) for text in valid) + len(valid) * 100)
+            if node.name in {"article", "main"}:
+                score += 500
+            score += 250 * sum(token in identity for token in positive)
+            score -= 1000 * sum(token in identity for token in negative)
+            full_text = _squash(node.get_text(" ", strip=True))
+            link_text = sum(
+                len(_squash(link.get_text(" ", strip=True))) for link in node.find_all("a")
+            )
+            score *= max(0.1, 1 - (link_text / max(1, len(full_text))))
+            candidates.append((score, node))
+        return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
     @staticmethod
     def _provider_title(title: str, publisher: str) -> str:

@@ -68,12 +68,28 @@ function formatTime(value) {
   }).format(new Date(value));
 }
 
+let toastTimer = null;
 function toast(message, isError = false) {
   const element = $("#toast");
-  element.textContent = message;
+  if (!element) return;
+  if (toastTimer) {
+    window.clearTimeout(toastTimer);
+    toastTimer = null;
+  }
+  element.innerHTML = "";
+  const icon = document.createElement("span");
+  icon.className = "toast-icon";
+  icon.textContent = isError ? "⚠" : "✓";
+  const text = document.createElement("span");
+  text.className = "toast-text";
+  text.textContent = message;
+  element.append(icon, text);
   element.classList.toggle("error", isError);
   element.classList.add("show");
-  window.setTimeout(() => element.classList.remove("show"), 3800);
+  toastTimer = window.setTimeout(() => {
+    element.classList.remove("show");
+    toastTimer = null;
+  }, 4200);
 }
 
 // ==================== ROUTING ====================
@@ -98,6 +114,11 @@ const ROUTE_TITLES = {
     eyebrow: "MEDIA INTELLIGENCE / SCHEDULER",
     title: "Automation <em>schedule.</em>",
     intro: "Configure the background scheduling engine for automated coverage discovery.",
+  },
+  "data-sync": {
+    eyebrow: "MEDIA INTELLIGENCE / DATA INTEGRITY",
+    title: "Data, <em>safely synchronized.</em>",
+    intro: "Review differences between the permanent article database and Google Sheets.",
   },
 };
 
@@ -136,6 +157,8 @@ function switchRoute(routeName) {
     loadRecipients();
   } else if (target === "automation") {
     loadAutomationSchedule();
+  } else if (target === "data-sync") {
+    loadDataSync();
   }
 }
 
@@ -198,6 +221,7 @@ async function loadOverview() {
     }
 
     const sched = data.automation_schedule;
+    const isDailyOrCustom = sched && (sched.frequency === "daily" || sched.frequency === "custom");
     if (sched) {
       const freqLabel = sched.frequency === "daily"
         ? "Daily"
@@ -206,17 +230,23 @@ async function loadOverview() {
         : `Every ${dayFullName(sched.day_of_week)}`;
       const timeLabel = formatHourMinute(sched.hour, sched.minute);
       $("#dash-automation-freq").textContent = `${freqLabel} at ${timeLabel}`;
-      $("#sidebar-schedule-summary").textContent = `${sched.day_of_week?.toUpperCase() || "MON"} · ${timeLabel}`;
+      $("#sidebar-schedule-summary").textContent = isDailyOrCustom
+        ? timeLabel
+        : `${sched.day_of_week?.toUpperCase() || "MON"} · ${timeLabel}`;
     }
 
     // Next scheduled run
     if (data.next_scheduled_fetch) {
       const next = new Date(data.next_scheduled_fetch);
       const nextFormatted = data.next_scheduled_fetch_formatted || `${formatDate(next)} · ${formatTime(next)}`;
-      $("#dash-next-run").textContent = formatDate(next, { weekday: "short", day: "2-digit", month: "short" });
-      $("#dash-next-run-sub").textContent = formatTime(next);
+      $("#dash-next-run").textContent = isDailyOrCustom
+        ? formatTime(next)
+        : formatDate(next, { weekday: "short", day: "2-digit", month: "short" });
+      $("#dash-next-run-sub").textContent = isDailyOrCustom ? (sched.frequency === "daily" ? "Daily run" : "Custom run") : formatTime(next);
 
-      $("#next-run-date").textContent = formatDate(next, { weekday: "long" });
+      $("#next-run-date").textContent = isDailyOrCustom
+        ? (sched.frequency === "daily" ? "Every Day" : "Custom Schedule")
+        : formatDate(next, { weekday: "long" });
       $("#next-run-time").textContent = `${formatTime(next)} · ${data.timezone}`;
       $("#schedule-next-run-text").textContent = nextFormatted;
 
@@ -240,6 +270,10 @@ async function loadOverview() {
       : searchReady && sheetReady ? "Operational" : "Setup needed";
     $("#system-status").textContent = statusLabel;
     $(".system-pill > span").style.background = statusLabel === "Setup needed" ? "#d7a115" : "";
+    const pendingSync = data.data_sync?.pending_reviews || 0;
+    const syncBadge = $("#sync-nav-count");
+    syncBadge.hidden = pendingSync === 0;
+    syncBadge.textContent = pendingSync;
   } catch (error) {
     console.error("Failed to load overview", error);
   }
@@ -491,14 +525,14 @@ function renderRecipients(items) {
     toggleBtn.type = "button";
     toggleBtn.className = "btn-action btn-action-toggle";
     toggleBtn.textContent = item.active ? "Disable" : "Enable";
-    toggleBtn.addEventListener("click", () => toggleRecipientStatus(item.id, !item.active));
+    toggleBtn.addEventListener("click", () => toggleRecipientStatus(item.id, !item.active, toggleBtn));
 
     // Delete button
     const delBtn = document.createElement("button");
     delBtn.type = "button";
     delBtn.className = "btn-action btn-action-delete";
     delBtn.textContent = "Delete";
-    delBtn.addEventListener("click", () => deleteRecipient(item.id, item.email));
+    delBtn.addEventListener("click", () => deleteRecipient(item.id, item.email, delBtn));
 
     actionsWrap.append(editBtn, toggleBtn, delBtn);
     actionsCell.append(actionsWrap);
@@ -557,6 +591,12 @@ async function handleRecipientSubmit(event) {
     return;
   }
 
+  const saveBtn = $("#recipient-dialog-save");
+  if (saveBtn) {
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Saving…";
+  }
+
   try {
     if (id) {
       await api(`/api/admin/recipients/${id}`, {
@@ -574,45 +614,67 @@ async function handleRecipientSubmit(event) {
     await Promise.all([loadRecipients(), loadOverview()]);
   } catch (error) {
     if (error.status === 401) {
-      $("#recipient-dialog").close();
       showAdminDialog(() => handleRecipientSubmit(event));
     } else {
       errorBox.textContent = error.message;
       errorBox.hidden = false;
     }
+  } finally {
+    if (saveBtn) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Save Recipient";
+    }
   }
 }
 
-async function toggleRecipientStatus(recipientId, newActive) {
+async function toggleRecipientStatus(recipientId, newActive, clickedBtn = null) {
+  if (clickedBtn) {
+    clickedBtn.disabled = true;
+    clickedBtn.textContent = "Updating…";
+  }
   try {
     await api(`/api/admin/recipients/${recipientId}`, {
       method: "PUT",
       body: { active: newActive },
     });
-    toast("✓ Email recipients updated successfully.");
+    toast(`✓ Email recipient ${newActive ? "enabled" : "disabled"} successfully.`);
     await Promise.all([loadRecipients(), loadOverview()]);
   } catch (error) {
     if (error.status === 401) {
-      showAdminDialog(() => toggleRecipientStatus(recipientId, newActive));
+      showAdminDialog(() => toggleRecipientStatus(recipientId, newActive, clickedBtn));
     } else {
       toast(error.message, true);
+    }
+  } finally {
+    if (clickedBtn) {
+      clickedBtn.disabled = false;
+      clickedBtn.textContent = newActive ? "Disable" : "Enable";
     }
   }
 }
 
-async function deleteRecipient(recipientId, email) {
+async function deleteRecipient(recipientId, email, clickedBtn = null) {
   if (!confirm(`Are you sure you want to remove "${email}" from the report recipients?`)) {
     return;
   }
+  if (clickedBtn) {
+    clickedBtn.disabled = true;
+    clickedBtn.textContent = "Deleting…";
+  }
   try {
     await api(`/api/admin/recipients/${recipientId}`, { method: "DELETE" });
-    toast("✓ Email recipients updated successfully.");
+    toast("✓ Email recipient removed successfully.");
     await Promise.all([loadRecipients(), loadOverview()]);
   } catch (error) {
     if (error.status === 401) {
-      showAdminDialog(() => deleteRecipient(recipientId, email));
+      showAdminDialog(() => deleteRecipient(recipientId, email, clickedBtn));
     } else {
       toast(error.message, true);
+    }
+  } finally {
+    if (clickedBtn) {
+      clickedBtn.disabled = false;
+      clickedBtn.textContent = "Delete";
     }
   }
 }
@@ -657,9 +719,14 @@ async function loadAutomationSchedule() {
     }
 
     // Next scheduled run display
+    const isDailyOrCustom = sched.frequency === "daily" || sched.frequency === "custom";
     const nextFormatted = data.next_scheduled_fetch_formatted;
+    const timeOnlyText = `${formatHourMinute(sched.hour, sched.minute)} IST`;
+    const fallbackText = isDailyOrCustom
+      ? timeOnlyText
+      : `${dayFullName(sched.day_of_week)}, ${timeOnlyText}`;
     $("#schedule-next-run-text").textContent = sched.enabled
-      ? nextFormatted || "Calculation pending…"
+      ? nextFormatted || fallbackText
       : "Automation paused (OFF)";
   } catch (error) {
     if (error.status === 401) {
@@ -667,6 +734,30 @@ async function loadAutomationSchedule() {
     } else {
       toast(error.message, true);
     }
+  }
+}
+
+function updateScheduleBannerPreview() {
+  const enabled = $("#auto-enabled-toggle").checked;
+  if (!enabled) {
+    $("#schedule-next-run-text").textContent = "Automation paused (OFF)";
+    return;
+  }
+  const freq = $("#auto-frequency").value;
+  const day = $("#auto-day-of-week").value;
+  const hour12 = parseInt($("#auto-hour").value, 10);
+  let minute = parseInt($("#auto-minute").value, 10);
+  if (isNaN(minute) || minute < 0) minute = 0;
+  if (minute > 59) minute = 59;
+  const ampm = $("#auto-ampm").value;
+  let hour24 = hour12 % 12;
+  if (ampm === "PM") hour24 += 12;
+  const timeStr = `${formatHourMinute(hour24, minute)} IST`;
+
+  if (freq === "daily" || freq === "custom") {
+    $("#schedule-next-run-text").textContent = timeStr;
+  } else {
+    $("#schedule-next-run-text").textContent = `${dayFullName(day)}, ${timeStr}`;
   }
 }
 
@@ -689,12 +780,18 @@ function handleFrequencyChange() {
     timeGroup.hidden = true;
     cronGroup.hidden = false;
   }
+  updateScheduleBannerPreview();
 }
 
 $("#auto-frequency").addEventListener("change", handleFrequencyChange);
+$("#auto-day-of-week").addEventListener("change", updateScheduleBannerPreview);
+$("#auto-hour").addEventListener("change", updateScheduleBannerPreview);
+$("#auto-minute").addEventListener("input", updateScheduleBannerPreview);
+$("#auto-ampm").addEventListener("change", updateScheduleBannerPreview);
 
 $("#auto-enabled-toggle").addEventListener("change", (e) => {
   $("#auto-enabled-label").textContent = e.target.checked ? "Automation: ON" : "Automation: OFF";
+  updateScheduleBannerPreview();
 });
 
 async function handleSaveSchedule() {
@@ -730,6 +827,7 @@ async function handleSaveSchedule() {
 
   const saveBtn = $("#btn-save-schedule");
   saveBtn.disabled = true;
+  saveBtn.textContent = "Saving Schedule…";
 
   try {
     const res = await api("/api/admin/automation", {
@@ -738,8 +836,13 @@ async function handleSaveSchedule() {
     });
     toast("✓ Automation schedule updated successfully.");
     const nextFormatted = res.next_scheduled_fetch_formatted;
+    const isDailyOrCustom = frequency === "daily" || frequency === "custom";
+    const timeOnlyText = `${formatHourMinute(hour24, minute)} IST`;
+    const fallbackText = isDailyOrCustom
+      ? timeOnlyText
+      : `${dayFullName(dayOfWeek)}, ${timeOnlyText}`;
     $("#schedule-next-run-text").textContent = enabled
-      ? nextFormatted || `${dayFullName(dayOfWeek)}, ${formatHourMinute(hour24, minute)} IST`
+      ? nextFormatted || fallbackText
       : "Automation paused (OFF)";
 
     await loadOverview();
@@ -751,6 +854,7 @@ async function handleSaveSchedule() {
     }
   } finally {
     saveBtn.disabled = false;
+    saveBtn.textContent = "Save Schedule";
   }
 }
 
@@ -760,7 +864,167 @@ $("#auto-minute").addEventListener("blur", (e) => {
   if (isNaN(val) || val < 0) val = 0;
   if (val > 59) val = 59;
   e.target.value = String(val).padStart(2, "0");
+  updateScheduleBannerPreview();
 });
+
+// ==================== DATA SYNC REVIEW ====================
+
+function renderDataSync(data) {
+  const summary = data.summary || {};
+  $("#sync-db-count").textContent = summary.database_articles ?? "—";
+  $("#sync-sheet-count").textContent = summary.sheet_articles ?? "—";
+  $("#sync-matching-count").textContent = summary.matching_articles ?? "—";
+  $("#sync-db-only-count").textContent = summary.database_only ?? 0;
+  $("#sync-sheet-only-count").textContent = summary.sheet_only ?? 0;
+  $("#sync-duplicates-count").textContent = summary.duplicates ?? 0;
+  const pending = summary.pending_reviews || 0;
+  $("#sync-pending-count").textContent = `${pending} PENDING`;
+  const alert = $("#sync-alert");
+  alert.hidden = pending === 0;
+  alert.textContent = pending
+    ? `⚠ ${pending} article synchronization issue${pending === 1 ? "" : "s"} require review.`
+    : "";
+
+  const body = $("#sync-review-rows");
+  body.replaceChildren();
+  const items = data.items || [];
+  if (!items.length) {
+    const row = body.insertRow();
+    const cell = row.insertCell();
+    cell.colSpan = 5;
+    cell.className = "loading-row";
+    cell.textContent = "No pending synchronization reviews.";
+    return;
+  }
+
+  const locationLabels = {
+    database_only: "Database only",
+    sheet_only: "Google Sheet only",
+    duplicate_sheet_rows: "Duplicate Sheet rows",
+  };
+  items.forEach((review) => {
+    const row = body.insertRow();
+    const article = row.insertCell();
+    const source = review.sheet_data || {};
+    const title = review.article_title || source.title || source.url || review.normalized_url;
+    article.textContent = title;
+    article.className = "title-cell";
+    row.insertCell().textContent = locationLabels[review.review_type] || review.review_type;
+    const status = row.insertCell();
+    status.innerHTML = '<span class="status-pill sync-review-required">Review required</span>';
+    row.insertCell().textContent = (review.sheet_rows || []).join(", ") || "—";
+    const actions = row.insertCell();
+    actions.className = "table-actions";
+    const choices = review.review_type === "database_only"
+      ? [["Restore to Sheet", "restore_to_sheet"], ["Keep deleted", "confirm_deletion"]]
+      : review.review_type === "sheet_only"
+      ? [["Import to database", "import_to_database"]]
+      : [["Consolidate rows", "consolidate_duplicates"]];
+    choices.forEach(([label, action]) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "btn-action";
+      button.textContent = label;
+      button.addEventListener("click", () => resolveSyncReview(review.id, action, button));
+      actions.append(button);
+    });
+  });
+}
+
+async function loadDataSync() {
+  try {
+    renderDataSync(await api("/api/admin/data-sync"));
+  } catch (error) {
+    if (error.status === 401) showAdminDialog(() => loadDataSync());
+    else toast(error.message, true);
+  }
+}
+
+async function runDataSync() {
+  const button = $("#btn-run-sync");
+  button.disabled = true;
+  button.textContent = "Checking synchronization…";
+  try {
+    await api("/api/admin/sync-sheets", { method: "POST" });
+    await Promise.all([loadDataSync(), loadOverview()]);
+    toast("Synchronization check complete.");
+  } catch (error) {
+    if (error.status === 401) showAdminDialog(() => runDataSync());
+    else toast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Check synchronization";
+  }
+}
+
+async function resolveSyncReview(reviewId, action, clickedButton = null) {
+  if (action === "confirm_deletion" && !window.confirm("Keep this article in the database but mark it intentionally removed from Google Sheets?")) return;
+
+  let rowButtons = [];
+  let originalText = "";
+  if (clickedButton) {
+    const parent = clickedButton.closest(".table-actions") || clickedButton.parentElement;
+    if (parent) {
+      rowButtons = [...parent.querySelectorAll("button")];
+      rowButtons.forEach((b) => (b.disabled = true));
+    }
+    originalText = clickedButton.textContent;
+    clickedButton.textContent = action === "import_to_database"
+      ? "Importing…"
+      : action === "restore_to_sheet"
+      ? "Restoring…"
+      : action === "confirm_deletion"
+      ? "Removing…"
+      : "Consolidating…";
+  }
+
+  try {
+    await api(`/api/admin/data-sync/${reviewId}/resolve`, {
+      method: "POST",
+      body: { action },
+    });
+    await Promise.all([loadDataSync(), loadOverview(), loadArticles()]);
+    const successMsg = action === "import_to_database"
+      ? "Article successfully imported to database."
+      : action === "restore_to_sheet"
+      ? "Article restored to Google Sheet."
+      : action === "confirm_deletion"
+      ? "Article marked intentionally removed from Google Sheet."
+      : "Duplicate Sheet rows consolidated.";
+    toast(successMsg);
+  } catch (error) {
+    if (error.status === 401) {
+      showAdminDialog(() => resolveSyncReview(reviewId, action, clickedButton));
+    } else {
+      toast(error.message, true);
+    }
+  } finally {
+    if (clickedButton) {
+      rowButtons.forEach((b) => (b.disabled = false));
+      clickedButton.textContent = originalText;
+    }
+  }
+}
+
+async function backfillDescriptions() {
+  const button = $("#btn-backfill-descriptions");
+  button.disabled = true;
+  button.textContent = "Backfilling descriptions…";
+  try {
+    const result = await api("/api/admin/backfill-descriptions", { method: "POST" });
+    await Promise.all([loadDataSync(), loadArticles()]);
+    toast(`Description backfill: ${result.updated} updated, ${result.failed} unavailable.`);
+  } catch (error) {
+    if (error.status === 401) showAdminDialog(() => backfillDescriptions());
+    else toast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Backfill descriptions";
+  }
+}
+
+$("#btn-run-sync").addEventListener("click", runDataSync);
+$("#btn-backfill-descriptions").addEventListener("click", backfillDescriptions);
 
 // ==================== FETCH ENGINE INTEGRATION ====================
 
@@ -779,6 +1043,20 @@ function renderProgress(fetch) {
   });
 }
 
+function resetFetchButton() {
+  const btn = $("#fetch-button");
+  if (!btn) return;
+  btn.disabled = false;
+  btn.innerHTML = '<span class="refresh-icon">↻</span> Fetch new articles';
+}
+
+function setFetchButtonLoading() {
+  const btn = $("#fetch-button");
+  if (!btn) return;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="refresh-icon spinning">↻</span> Fetching articles…';
+}
+
 async function pollFetch(fetchId, attempts = 0) {
   window.clearTimeout(state.pollTimer);
   try {
@@ -788,12 +1066,12 @@ async function pollFetch(fetchId, attempts = 0) {
       state.pollTimer = window.setTimeout(() => pollFetch(fetchId), 1400);
       return;
     }
-    $("#fetch-button").disabled = false;
-    await Promise.all([loadOverview(), loadArticles(), loadPublishers(), loadHistory()]);
+    resetFetchButton();
+    await Promise.all([loadOverview(), loadArticles(), loadPublishers(), loadHistory(), loadDataSync()]);
     toast(
       fetch.status === "success"
         ? `Fetch complete: ${fetch.new_articles} new article(s).`
-        : "Fetch failed. Existing data was preserved.",
+        : `Fetch failed: ${fetch.error || "Existing data was preserved."}`,
       fetch.status !== "success"
     );
     window.setTimeout(() => {
@@ -804,24 +1082,26 @@ async function pollFetch(fetchId, attempts = 0) {
       state.pollTimer = window.setTimeout(() => pollFetch(fetchId, attempts + 1), 400);
       return;
     }
-    $("#fetch-button").disabled = false;
+    resetFetchButton();
+    $("#fetch-progress").hidden = true;
     toast(error.message, true);
   }
 }
 
 async function startFetch(adminKey = getAdminKey()) {
-  $("#fetch-button").disabled = true;
+  setFetchButtonLoading();
   try {
     const data = await api("/api/fetch", {
       method: "POST",
       headers: adminKey ? { "X-Admin-Key": adminKey } : {},
     });
     $("#fetch-progress").hidden = false;
+    $("#progress-title").textContent = "Fetch in progress";
     $("#progress-copy").textContent = "Preparing the incremental search window…";
     toast("Incremental fetch started.");
     pollFetch(data.fetch_id);
   } catch (error) {
-    $("#fetch-button").disabled = false;
+    resetFetchButton();
     if (error.status === 401) {
       showAdminDialog((key) => startFetch(key));
     } else {
@@ -832,6 +1112,11 @@ async function startFetch(adminKey = getAdminKey()) {
 
 function showAdminDialog(onSuccess) {
   const dialog = $("#admin-dialog");
+  const errorBox = $("#admin-error-msg");
+  if (errorBox) {
+    errorBox.hidden = true;
+    errorBox.textContent = "";
+  }
   dialog.showModal();
   $("#admin-key").focus();
   state._pendingAdminCallback = onSuccess;
@@ -840,10 +1125,9 @@ function showAdminDialog(onSuccess) {
 $("#fetch-button").addEventListener("click", () => startFetch());
 
 $("#admin-form").addEventListener("submit", (event) => {
-  const submitter = event.submitter;
-  if (!submitter || submitter.value !== "submit") return;
   event.preventDefault();
-  const key = $("#admin-key").value;
+  const key = $("#admin-key").value.trim();
+  if (!key) return;
   sessionStorage.setItem("gp_admin_key", key);
   $("#admin-dialog").close();
   if (state._pendingAdminCallback) {
@@ -852,6 +1136,22 @@ $("#admin-form").addEventListener("submit", (event) => {
     cb(key);
   }
 });
+
+const adminCloseBtn = $("#admin-dialog-close");
+if (adminCloseBtn) {
+  adminCloseBtn.addEventListener("click", () => {
+    $("#admin-dialog").close();
+    state._pendingAdminCallback = null;
+  });
+}
+
+const adminCancelBtn = $("#admin-dialog-cancel");
+if (adminCancelBtn) {
+  adminCancelBtn.addEventListener("click", () => {
+    $("#admin-dialog").close();
+    state._pendingAdminCallback = null;
+  });
+}
 
 // ==================== FILTERS & SORTING ====================
 

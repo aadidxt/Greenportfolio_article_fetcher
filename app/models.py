@@ -23,6 +23,9 @@ class ArticleDraft:
     url: str
     normalized_url: str
     source: str = ""
+    canonical_url: str = ""
+    original_url: str = ""
+    normalized_title: str = ""
 
 
 @dataclass(slots=True)
@@ -31,6 +34,9 @@ class ArticleRecord(ArticleDraft):
     discovered_at: str = ""
     synced_to_sheet: bool = False
     successful_fetch_id: str | None = None
+    sheet_status: str = "pending"
+    extraction_status: str = "pending"
+    extraction_error: str | None = None
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -45,4 +51,3 @@ class FetchCounters:
     new_articles: int = 0
     duplicates: int = 0
     failed_articles: int = 0
-

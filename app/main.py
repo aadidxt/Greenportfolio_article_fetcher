@@ -8,7 +8,12 @@ import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc
 from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -18,12 +23,14 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from pydantic import BaseModel, Field
+from dateutil.parser import parse as parse_date
 
 from .config import Settings
 from .database import Database, utc_now
 from .emailer import WeeklyEmailSender
 from .exporter import export_csv, export_xlsx
 from .extractor import ArticleExtractor
+from .models import ArticleDraft, SearchCandidate
 from .pipeline import FetchAlreadyRunning, FetchPipeline
 from .scheduler import (
     JOB_ID,
@@ -34,6 +41,7 @@ from .scheduler import (
 )
 from .search import InternetSearchService
 from .sheets import GoogleSheetsStore
+from .url_utils import normalize_url
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,6 +88,15 @@ class AutomationScheduleUpdate(BaseModel):
     minute: int = Field(0, ge=0, le=59)
     timezone: str = "Asia/Kolkata"
     cron: str | None = None
+
+
+class SyncReviewResolution(BaseModel):
+    action: Literal[
+        "restore_to_sheet",
+        "confirm_deletion",
+        "import_to_database",
+        "consolidate_duplicates",
+    ]
 
 
 class SlidingWindowRateLimiter:
@@ -152,6 +169,10 @@ app = FastAPI(
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
+    if request.url.path == "/":
+        # The HTML carries versioned asset URLs; revalidate it so deployments
+        # cannot pair a new navigation link with an older cached router.
+        response.headers["Cache-Control"] = "no-cache"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
@@ -196,7 +217,11 @@ def overview() -> dict:
         if (job and schedule.get("enabled", True))
         else None
     )
-    next_formatted = format_next_run(next_run, schedule.get("timezone", settings.timezone))
+    next_formatted = format_next_run(
+        next_run,
+        schedule.get("timezone", settings.timezone),
+        schedule.get("frequency", "weekly"),
+    )
     active_recipients = database.get_active_recipient_emails()
     all_recipients = database.list_recipients()
 
@@ -210,6 +235,7 @@ def overview() -> dict:
             "active_recipients_count": len(active_recipients),
             "total_recipients_count": len(all_recipients),
             "search_providers": settings.search_provider_names,
+            "data_sync": database.data_sync_status(),
             "integrations": {
                 "google_sheets": sheets.configuration_status(),
                 "email": emailer.configuration_status(),
@@ -356,7 +382,11 @@ def get_automation(_: None = Depends(require_admin_key)) -> dict:
     return {
         "schedule": schedule,
         "next_scheduled_fetch": next_run.astimezone(UTC).isoformat() if next_run else None,
-        "next_scheduled_fetch_formatted": format_next_run(next_run, schedule.get("timezone", settings.timezone)),
+        "next_scheduled_fetch_formatted": format_next_run(
+            next_run,
+            schedule.get("timezone", settings.timezone),
+            schedule.get("frequency", "weekly"),
+        ),
     }
 
 
@@ -370,7 +400,11 @@ def save_automation(payload: AutomationScheduleUpdate, _: None = Depends(require
         return {
             "schedule": saved_schedule,
             "next_scheduled_fetch": next_fire.astimezone(UTC).isoformat() if next_fire else None,
-            "next_scheduled_fetch_formatted": format_next_run(next_fire, saved_schedule.get("timezone", settings.timezone)),
+            "next_scheduled_fetch_formatted": format_next_run(
+                next_fire,
+                saved_schedule.get("timezone", settings.timezone),
+                saved_schedule.get("frequency", "weekly"),
+            ),
             "status": "saved",
         }
     except ValueError as exc:
@@ -378,14 +412,97 @@ def save_automation(payload: AutomationScheduleUpdate, _: None = Depends(require
 
 
 @app.post("/api/admin/sync-sheets")
-def sync_sheets(request: Request) -> dict:
-    verify_admin(request)
+def sync_sheets(_: None = Depends(require_admin_key)) -> dict:
+    if pipeline._lock.locked():
+        raise HTTPException(status_code=409, detail="A fetch is already running")
     if not sheets.enabled:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Google Sheets sync is not enabled in settings.",
         )
     return sheets.sync_database(database)
+
+
+@app.get("/api/admin/data-sync")
+def data_sync(_: None = Depends(require_admin_key)) -> dict:
+    return {
+        "summary": database.data_sync_status(),
+        "items": database.list_sync_reviews(),
+    }
+
+
+@app.post("/api/admin/data-sync/{review_id}/resolve")
+def resolve_data_sync(
+    review_id: str,
+    payload: SyncReviewResolution,
+    _: None = Depends(require_admin_key),
+) -> dict:
+    if pipeline._lock.locked():
+        raise HTTPException(status_code=409, detail="A fetch is already running")
+    if not sheets.enabled:
+        raise HTTPException(status_code=400, detail="Google Sheets sync is disabled")
+    try:
+        if payload.action == "restore_to_sheet":
+            summary = sheets.restore_review(database, review_id)
+        elif payload.action == "confirm_deletion":
+            summary = sheets.confirm_removal(database, review_id)
+        elif payload.action == "consolidate_duplicates":
+            summary = sheets.consolidate_duplicate_review(database, review_id)
+        else:
+            review = database.get_sync_review(review_id)
+            if not review or review["status"] != "pending" or review["review_type"] != "sheet_only":
+                raise KeyError("Pending sheet-only review not found")
+            row = review["sheet_data"]
+            raw_url = str(row.get("url", "")).strip()
+            normalized = normalize_url(raw_url)
+            published = parse_date(str(row.get("published_date", "")))
+            if published.tzinfo is None:
+                published = published.replace(tzinfo=UTC)
+            candidate = SearchCandidate(
+                url=raw_url,
+                title=str(row.get("title", "")).strip(),
+                published_at=published,
+                publisher=str(row.get("publisher", "")).strip(),
+                source="google-sheet-review",
+            )
+            extracted = extractor.extract(candidate)
+            if extracted is not None:
+                draft = extracted
+            else:
+                title = candidate.title
+                publisher = candidate.publisher
+                if not title or not publisher:
+                    raise ValueError("Sheet row needs publisher, published date, title, and URL")
+                draft = ArticleDraft(
+                    publisher=publisher,
+                    published_at=published,
+                    title=title,
+                    # A Sheet cell is not proof that text came from the article
+                    # body. Keep it blank when live extraction cannot verify it.
+                    description="",
+                    url=normalized,
+                    normalized_url=normalized,
+                    source="google-sheet-review",
+                    canonical_url=normalized,
+                    original_url=raw_url,
+                    normalized_title=" ".join(title.casefold().split()),
+                )
+            summary = sheets.import_review(database, review_id, draft)
+        return {"status": "resolved", "summary": summary}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/admin/backfill-descriptions")
+def backfill_descriptions(
+    limit: int | None = Query(None, ge=1, le=1000),
+    _: None = Depends(require_admin_key),
+) -> dict:
+    if pipeline._lock.locked():
+        raise HTTPException(status_code=409, detail="A fetch is already running")
+    return pipeline.backfill_descriptions(limit=limit)
 
 
 @app.get("/api/exports/{scope}.{file_format}")
@@ -422,3 +539,10 @@ app.mount("/assets", StaticFiles(directory=static_dir), name="assets")
 @app.get("/", include_in_schema=False)
 def dashboard() -> FileResponse:
     return FileResponse(static_dir / "index.html")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("app.main:app", host=settings.app_host, port=settings.app_port, reload=True)
+

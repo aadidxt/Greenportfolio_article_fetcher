@@ -4,7 +4,12 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+try:
+    from datetime import UTC
+except ImportError:
+    UTC = timezone.utc
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Iterator
@@ -81,6 +86,13 @@ class Database:
                     discovered_at TEXT NOT NULL,
                     synced_to_sheet INTEGER NOT NULL DEFAULT 0,
                     successful_fetch_id TEXT,
+                    canonical_url TEXT NOT NULL DEFAULT '',
+                    original_url TEXT NOT NULL DEFAULT '',
+                    normalized_title TEXT NOT NULL DEFAULT '',
+                    sheet_status TEXT NOT NULL DEFAULT 'pending',
+                    extraction_status TEXT NOT NULL DEFAULT 'pending',
+                    extraction_error TEXT,
+                    description_updated_at TEXT,
                     FOREIGN KEY(successful_fetch_id) REFERENCES fetches(id)
                 );
 
@@ -106,9 +118,92 @@ class Database:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS sync_reviews (
+                    id TEXT PRIMARY KEY,
+                    review_key TEXT NOT NULL UNIQUE,
+                    review_type TEXT NOT NULL,
+                    article_id TEXT,
+                    normalized_url TEXT NOT NULL DEFAULT '',
+                    sheet_rows TEXT NOT NULL DEFAULT '[]',
+                    sheet_data TEXT NOT NULL DEFAULT '{}',
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    resolution TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(article_id) REFERENCES articles(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS article_url_aliases (
+                    normalized_url TEXT PRIMARY KEY,
+                    article_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(article_id) REFERENCES articles(id)
+                );
                 """
             )
+            self._migrate_schema(connection)
             self._repair_false_successes(connection)
+
+    @staticmethod
+    def _migrate_schema(connection: sqlite3.Connection) -> None:
+        """Apply additive migrations without replacing existing user data."""
+        columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(articles)").fetchall()
+        }
+        additions = {
+            "canonical_url": "TEXT NOT NULL DEFAULT ''",
+            "original_url": "TEXT NOT NULL DEFAULT ''",
+            "normalized_title": "TEXT NOT NULL DEFAULT ''",
+            "sheet_status": "TEXT NOT NULL DEFAULT 'pending'",
+            "extraction_status": "TEXT NOT NULL DEFAULT 'pending'",
+            "extraction_error": "TEXT",
+            "description_updated_at": "TEXT",
+        }
+        for name, definition in additions.items():
+            if name not in columns:
+                connection.execute(f"ALTER TABLE articles ADD COLUMN {name} {definition}")
+
+        connection.execute(
+            "UPDATE articles SET canonical_url = url WHERE canonical_url = ''"
+        )
+        connection.execute(
+            "UPDATE articles SET original_url = url WHERE original_url = ''"
+        )
+        rows = connection.execute(
+            "SELECT id, title FROM articles WHERE normalized_title = ''"
+        ).fetchall()
+        for row in rows:
+            normalized_title = " ".join(str(row["title"]).casefold().split())
+            connection.execute(
+                "UPDATE articles SET normalized_title = ? WHERE id = ?",
+                (normalized_title, row["id"]),
+            )
+        connection.execute(
+            """UPDATE articles SET sheet_status = CASE
+               WHEN synced_to_sheet = 1 THEN 'active' ELSE 'pending' END
+               WHERE sheet_status = 'pending'"""
+        )
+        connection.execute(
+            """UPDATE articles SET extraction_status = CASE
+               WHEN length(trim(description)) > 0 THEN 'success' ELSE 'pending' END
+               WHERE extraction_status = 'pending'"""
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_articles_canonical_url ON articles(canonical_url)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_articles_sheet_status ON articles(sheet_status)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sync_reviews_status ON sync_reviews(status, review_type)"
+        )
+        connection.execute(
+            """INSERT OR IGNORE INTO article_url_aliases
+            (normalized_url, article_id, created_at)
+            SELECT normalized_url, id, discovered_at FROM articles"""
+        )
 
     @staticmethod
     def _repair_false_successes(connection: sqlite3.Connection) -> None:
@@ -304,8 +399,10 @@ class Database:
                 connection.execute(
                     """INSERT INTO articles
                     (id, publisher, published_at, title, description, url,
-                     normalized_url, source, discovered_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     normalized_url, source, discovered_at, canonical_url,
+                     original_url, normalized_title, sheet_status,
+                     extraction_status, description_updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
                     (
                         article_id,
                         draft.publisher,
@@ -316,7 +413,17 @@ class Database:
                         draft.normalized_url,
                         draft.source,
                         isoformat(discovered_at),
+                        draft.canonical_url or draft.url,
+                        draft.original_url or draft.url,
+                        draft.normalized_title or " ".join(draft.title.casefold().split()),
+                        "success" if draft.description.strip() else "pending",
+                        isoformat(discovered_at) if draft.description.strip() else None,
                     ),
+                )
+                connection.execute(
+                    """INSERT OR IGNORE INTO article_url_aliases
+                    (normalized_url, article_id, created_at) VALUES (?, ?, ?)""",
+                    (draft.normalized_url, article_id, isoformat(discovered_at)),
                 )
             return True
         except sqlite3.IntegrityError:
@@ -325,7 +432,15 @@ class Database:
     def find_duplicate(self, draft: ArticleDraft) -> str | None:
         with self.connect() as connection:
             exact = connection.execute(
-                "SELECT id FROM articles WHERE normalized_url = ?", (draft.normalized_url,)
+                """SELECT a.id FROM articles a
+                LEFT JOIN article_url_aliases u ON u.article_id = a.id
+                WHERE a.normalized_url = ? OR a.canonical_url = ?
+                   OR u.normalized_url = ? LIMIT 1""",
+                (
+                    draft.normalized_url,
+                    draft.canonical_url or draft.normalized_url,
+                    draft.normalized_url,
+                ),
             ).fetchone()
             if exact:
                 return str(exact["id"])
@@ -351,6 +466,66 @@ class Database:
                 return str(row["id"])
         return None
 
+    def get_article(self, article_id: str) -> ArticleRecord | None:
+        items = self._article_query("WHERE id = ?", (article_id,))
+        return items[0] if items else None
+
+    def find_by_normalized_url(self, normalized_url: str) -> ArticleRecord | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT a.* FROM articles a
+                LEFT JOIN article_url_aliases u ON u.article_id = a.id
+                WHERE a.normalized_url = ? OR a.canonical_url = ?
+                   OR u.normalized_url = ? LIMIT 1""",
+                (normalized_url, normalized_url, normalized_url),
+            ).fetchone()
+        return self._row_to_article(row) if row else None
+
+    def add_url_alias(self, article_id: str, normalized_url: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO article_url_aliases
+                (normalized_url, article_id, created_at) VALUES (?, ?, ?)""",
+                (normalized_url, article_id, isoformat()),
+            )
+
+    def url_aliases(self) -> dict[str, str]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT normalized_url, article_id FROM article_url_aliases"
+            ).fetchall()
+        return {str(row["normalized_url"]): str(row["article_id"]) for row in rows}
+
+    def blank_description_articles(self, limit: int | None = None) -> list[ArticleRecord]:
+        suffix = "WHERE description IS NULL OR trim(description) = '' ORDER BY discovered_at"
+        params: tuple[Any, ...] = ()
+        if limit is not None:
+            suffix += " LIMIT ?"
+            params = (max(1, int(limit)),)
+        return self._article_query(suffix, params)
+
+    def update_description(self, article_id: str, description: str) -> bool:
+        description = " ".join(description.split()).strip()[:5000]
+        if not description:
+            return False
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """UPDATE articles SET description = ?, extraction_status = 'success',
+                extraction_error = NULL, description_updated_at = ?
+                WHERE id = ? AND (description IS NULL OR trim(description) = '')""",
+                (description, isoformat(), article_id),
+            )
+        return cursor.rowcount > 0
+
+    def record_extraction_failure(self, article_id: str, error: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """UPDATE articles SET extraction_status = 'extraction_failed',
+                extraction_error = ? WHERE id = ?
+                AND (description IS NULL OR trim(description) = '')""",
+                (error.strip()[:2000], article_id),
+            )
+
     def unsynced_articles(self) -> list[ArticleRecord]:
         return self._article_query("WHERE synced_to_sheet = 0 ORDER BY discovered_at")
 
@@ -372,6 +547,7 @@ class Database:
 
     @staticmethod
     def _row_to_article(row: sqlite3.Row) -> ArticleRecord:
+        keys = set(row.keys())
         return ArticleRecord(
             id=row["id"],
             publisher=row["publisher"],
@@ -381,9 +557,21 @@ class Database:
             url=row["url"],
             normalized_url=row["normalized_url"],
             source=row["source"],
+            canonical_url=row["canonical_url"] if "canonical_url" in keys else row["url"],
+            original_url=row["original_url"] if "original_url" in keys else row["url"],
+            normalized_title=(
+                row["normalized_title"]
+                if "normalized_title" in keys
+                else " ".join(str(row["title"]).casefold().split())
+            ),
             discovered_at=row["discovered_at"],
             synced_to_sheet=bool(row["synced_to_sheet"]),
             successful_fetch_id=row["successful_fetch_id"],
+            sheet_status=row["sheet_status"] if "sheet_status" in keys else "pending",
+            extraction_status=(
+                row["extraction_status"] if "extraction_status" in keys else "pending"
+            ),
+            extraction_error=row["extraction_error"] if "extraction_error" in keys else None,
         )
 
     def mark_synced(self, article_ids: list[str]) -> None:
@@ -392,9 +580,139 @@ class Database:
         placeholders = ",".join("?" for _ in article_ids)
         with self.connect() as connection:
             connection.execute(
-                f"UPDATE articles SET synced_to_sheet = 1 WHERE id IN ({placeholders})",
+                f"""UPDATE articles SET synced_to_sheet = 1, sheet_status = 'active'
+                WHERE id IN ({placeholders})""",
                 article_ids,
             )
+
+    def set_sheet_status(self, article_id: str, sheet_status: str) -> None:
+        allowed = {"pending", "active", "missing_from_sheet", "intentionally_removed"}
+        if sheet_status not in allowed:
+            raise ValueError(f"Invalid sheet status: {sheet_status}")
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE articles SET sheet_status = ? WHERE id = ?",
+                (sheet_status, article_id),
+            )
+
+    def create_sync_review(
+        self,
+        *,
+        review_key: str,
+        review_type: str,
+        article_id: str | None = None,
+        normalized_url: str = "",
+        sheet_rows: list[int] | None = None,
+        sheet_data: dict[str, Any] | None = None,
+    ) -> str:
+        allowed = {"database_only", "sheet_only", "duplicate_sheet_rows"}
+        if review_type not in allowed:
+            raise ValueError(f"Invalid sync review type: {review_type}")
+        now = isoformat()
+        review_id = uuid.uuid4().hex
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO sync_reviews
+                (id, review_key, review_type, article_id, normalized_url,
+                 sheet_rows, sheet_data, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                ON CONFLICT(review_key) DO UPDATE SET
+                    article_id = excluded.article_id,
+                    normalized_url = excluded.normalized_url,
+                    sheet_rows = excluded.sheet_rows,
+                    sheet_data = excluded.sheet_data,
+                    status = 'pending', resolution = NULL,
+                    updated_at = excluded.updated_at""",
+                (
+                    review_id,
+                    review_key,
+                    review_type,
+                    article_id,
+                    normalized_url,
+                    json.dumps(sheet_rows or []),
+                    json.dumps(sheet_data or {}),
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT id FROM sync_reviews WHERE review_key = ?", (review_key,)
+            ).fetchone()
+        return str(row["id"])
+
+    def get_sync_review(self, review_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM sync_reviews WHERE id = ?", (review_id,)
+            ).fetchone()
+        return self._review_dict(row) if row else None
+
+    def list_sync_reviews(self, *, pending_only: bool = True) -> list[dict[str, Any]]:
+        where = "WHERE r.status = 'pending'" if pending_only else ""
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""SELECT r.*, a.title AS article_title, a.publisher AS article_publisher,
+                a.url AS article_url, a.sheet_status AS article_sheet_status
+                FROM sync_reviews r LEFT JOIN articles a ON a.id = r.article_id
+                {where} ORDER BY r.created_at, r.id"""
+            ).fetchall()
+        return [self._review_dict(row) for row in rows]
+
+    @staticmethod
+    def _review_dict(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["sheet_rows"] = json.loads(result.get("sheet_rows") or "[]")
+        result["sheet_data"] = json.loads(result.get("sheet_data") or "{}")
+        return result
+
+    def resolve_sync_review(self, review_id: str, resolution: str) -> None:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """UPDATE sync_reviews SET status = 'resolved', resolution = ?,
+                updated_at = ? WHERE id = ? AND status = 'pending'""",
+                (resolution, isoformat(), review_id),
+            )
+        if cursor.rowcount == 0:
+            raise KeyError(f"Pending sync review '{review_id}' not found")
+
+    def resolve_review_key(self, review_key: str, resolution: str = "synchronized") -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """UPDATE sync_reviews SET status = 'resolved', resolution = ?,
+                updated_at = ? WHERE review_key = ? AND status = 'pending'""",
+                (resolution, isoformat(), review_key),
+            )
+
+    def data_sync_status(self) -> dict[str, Any]:
+        summary = self.get_state("sheet_sync_summary", {})
+        if not isinstance(summary, dict):
+            summary = {}
+        with self.connect() as connection:
+            database_articles = int(
+                connection.execute("SELECT COUNT(1) FROM articles").fetchone()[0]
+            )
+            pending = int(
+                connection.execute(
+                    "SELECT COUNT(1) FROM sync_reviews WHERE status = 'pending'"
+                ).fetchone()[0]
+            )
+            counts = {
+                str(row["review_type"]): int(row["count"])
+                for row in connection.execute(
+                    """SELECT review_type, COUNT(1) AS count FROM sync_reviews
+                    WHERE status = 'pending' GROUP BY review_type"""
+                ).fetchall()
+            }
+        summary.update(
+            {
+                "database_articles": database_articles,
+                "pending_reviews": pending,
+                "database_only": counts.get("database_only", 0),
+                "sheet_only": counts.get("sheet_only", 0),
+                "duplicates": counts.get("duplicate_sheet_rows", 0),
+            }
+        )
+        return summary
 
     def assign_successful_fetch(self, article_ids: list[str], fetch_id: str) -> None:
         if not article_ids:

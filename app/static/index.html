@@ -8,8 +8,8 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Text:ital@0;1&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/assets/styles.css" />
-    <script src="/assets/app.js" defer></script>
+    <link rel="stylesheet" href="/assets/styles.css?v=20260909-schedfix" />
+    <script src="/assets/app.js?v=20260909-schedfix" defer></script>
   </head>
   <body>
     <div class="shell">
@@ -23,6 +23,7 @@
           <a class="nav-item" href="#articles" data-route="articles"><span class="nav-icon">▤</span>Articles</a>
           <a class="nav-item" href="#email" data-route="email"><span class="nav-icon">✉</span>Email Settings</a>
           <a class="nav-item" href="#automation" data-route="automation"><span class="nav-icon">⚙</span>Automation Settings</a>
+          <a class="nav-item" href="#data-sync" data-route="data-sync"><span class="nav-icon">⇄</span>Data Sync <b id="sync-nav-count" hidden></b></a>
         </nav>
         <div class="sidebar-note">
           <span class="eyebrow">AUTOMATION</span>
@@ -400,6 +401,44 @@
           </div>
         </section>
 
+        <!-- VIEW 5: DATA SYNC -->
+        <section class="cms-view" id="view-data-sync" hidden>
+          <div class="articles-header-bar">
+            <div>
+              <p class="eyebrow">DATA INTEGRITY</p>
+              <h2 class="section-heading">Database ⇄ <em>Google Sheet</em></h2>
+              <p class="section-sub">Review missing or duplicate records without deleting historical database articles.</p>
+            </div>
+            <div class="sync-toolbar">
+              <button class="button button-secondary" id="btn-backfill-descriptions">Backfill descriptions</button>
+              <button class="button button-primary" id="btn-run-sync">Check synchronization</button>
+            </div>
+          </div>
+
+          <div class="sync-alert" id="sync-alert" hidden></div>
+          <div class="sync-stats" aria-label="Data synchronization statistics">
+            <div><small>Database</small><strong id="sync-db-count">—</strong></div>
+            <div><small>Google Sheet</small><strong id="sync-sheet-count">—</strong></div>
+            <div><small>Matching</small><strong id="sync-matching-count">—</strong></div>
+            <div><small>Database only</small><strong id="sync-db-only-count">—</strong></div>
+            <div><small>Sheet only</small><strong id="sync-sheet-only-count">—</strong></div>
+            <div><small>Duplicates</small><strong id="sync-duplicates-count">—</strong></div>
+          </div>
+
+          <section class="panel sync-review-panel">
+            <div class="panel-heading compact">
+              <div><p class="eyebrow">PENDING REVIEWS</p><h2>Sync <em>review</em></h2></div>
+              <span class="append-only" id="sync-pending-count">0 PENDING</span>
+            </div>
+            <div class="table-wrap">
+              <table class="cms-table">
+                <thead><tr><th>Article</th><th>Location</th><th>Status</th><th>Sheet rows</th><th>Actions</th></tr></thead>
+                <tbody id="sync-review-rows"><tr><td colspan="5" class="loading-row">Run a synchronization check to compare both stores.</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
         <footer>
           <span>Green Portfolio Media Monitor</span>
           <span>CMS & Media Intelligence · Append-only</span>
@@ -439,7 +478,7 @@
     <!-- DIALOG: ADMIN KEY ENTRY -->
     <dialog id="admin-dialog">
       <form method="dialog" id="admin-form">
-        <button class="dialog-close" value="cancel" aria-label="Close">×</button>
+        <button type="button" class="dialog-close" id="admin-dialog-close" aria-label="Close">×</button>
         <p class="eyebrow">PROTECTED ACTION</p>
         <h2>Enter your admin key</h2>
         <p>The key is sent only to this server and retained for this browser session.</p>
@@ -447,9 +486,10 @@
           <span>Admin API key</span>
           <input id="admin-key" type="password" autocomplete="current-password" required />
         </label>
+        <div id="admin-error-msg" class="dialog-error" hidden></div>
         <div class="dialog-actions">
-          <button class="button button-secondary" value="cancel">Cancel</button>
-          <button class="button button-primary" value="submit">Continue</button>
+          <button type="button" class="button button-secondary" id="admin-dialog-cancel">Cancel</button>
+          <button type="submit" class="button button-primary" id="admin-dialog-submit">Continue</button>
         </div>
       </form>
     </dialog>

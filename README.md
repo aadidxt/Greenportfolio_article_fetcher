@@ -13,7 +13,7 @@ The interface is an original internal-dashboard design informed by Green Portfol
 - Original publication date, title, publisher, canonical URL, and actual first article paragraph extraction
 - Canonical URL, normalized URL, title/publisher/date, and near-title deduplication
 - SQLite state/history with a durable Docker volume
-- Append-only Google Sheets integration for the supplied sheet ID
+- Review-based database ↔ Google Sheets synchronization for the supplied sheet ID
 - Latest-successful-fetch and complete-dataset exports in XLSX and CSV
 - Protected manual-fetch and scheduler endpoints with rate limiting
 - APScheduler Monday 09:00 job plus an optional GitHub Actions wake-up trigger
@@ -51,7 +51,7 @@ The default `GOOGLE_SHEET_ID` is already set to:
 4. Put the complete JSON in the `GOOGLE_SERVICE_ACCOUNT_JSON` secret. Raw JSON and base64-encoded JSON are both accepted.
 5. Leave `GOOGLE_WORKSHEET_NAME` blank to use the first worksheet (`gid=0`), or set its exact name.
 
-The application never clears, deletes, or rewrites article rows. It creates the five required headers only if the worksheet is empty, validates existing headers, reads existing URLs before append, and uses `append_rows`. The internal article ID/hash and sync flags remain in SQLite.
+The application creates the five required headers only if the worksheet is empty and validates existing headers. New database rows are appended only after URL/alias checks. A previously synchronized row that disappears is flagged for review rather than restored or deleted automatically. Sheet-only and duplicate rows are also flagged. Duplicate consolidation deletes only the reviewed extra rows after filling blank cells in the retained row; it is never automatic. Stable article hashes, URL aliases, extraction status, Sheet status, and review history remain in SQLite.
 
 Required sheet headers, in order:
 
@@ -82,6 +82,8 @@ last_successful_fetch - OVERLAP_HOURS
 The overlap protects against indexing delays and timezone differences; persistent URL hashes and secondary duplicate checks prevent re-insertion.
 
 If Sheets or a required scheduled email fails, the run is marked failed and `last_successful_fetch` is not advanced. Locally discovered rows remain durable and unsynced rows are retried. Before retrying an append, the app checks URLs already present in the sheet, so a crash between a Sheets append and a local acknowledgement does not create duplicate rows. Historical rows are never deleted.
+
+The **Data Sync** CMS view runs a two-way comparison. Database-only rows can be restored or marked intentionally removed; intentionally removed rows remain in SQLite and are not re-added on later scans. Sheet-only rows can be imported after review, and duplicate Sheet rows can be safely consolidated. **Backfill descriptions** revisits blank historical rows and records `extraction_failed` when no defensible article-body paragraph is available.
 
 ## Weekly email
 
@@ -130,6 +132,10 @@ For hosts that sleep, the optional GitHub Actions workflow calls `/api/jobs/week
 - `GET /api/fetches`
 - `POST /api/fetch` — requires `X-Admin-Key` in production
 - `POST /api/jobs/weekly` — same protection, sends scheduled email
+- `GET /api/admin/data-sync` — synchronization summary and pending reviews
+- `POST /api/admin/sync-sheets` — run a two-way consistency check
+- `POST /api/admin/data-sync/{review_id}/resolve` — restore, confirm removal, import, or consolidate
+- `POST /api/admin/backfill-descriptions` — retry blank article-body descriptions
 - `GET /api/exports/new.xlsx` / `.csv`
 - `GET /api/exports/all.xlsx` / `.csv`
 - `GET /health`
@@ -147,5 +153,8 @@ The suite verifies:
 3. Recovery behavior when a Sheet append fails.
 4. Scheduled email generation with both valid XLSX payloads.
 5. Monday 09:00 Asia/Kolkata scheduling (03:30 UTC).
+6. Manual Sheet deletion review, duplicate-safe restore, and persistent intentional removal.
+7. Sheet-only import, duplicate-row review/consolidation, and description backfill propagation.
+8. Explicit, structured-data, publisher-container, and readability-style body extraction fallbacks.
 
 Live Google, search-provider, and SMTP calls require your credentials and are intentionally not performed by the automated test suite.
