@@ -85,6 +85,21 @@ def test_google_sheets_sync_empty_sheet_and_duplicates(test_settings):
     assert worksheet.appended_rows[0][4] == "https://example.com/three"
 
 
+def test_google_sheets_status_exposes_safe_browser_url(test_settings):
+    store = GoogleSheetsStore(
+        replace(
+            test_settings,
+            google_sheets_enabled=True,
+            google_sheet_id="https://docs.google.com/spreadsheets/d/example-sheet_123/edit#gid=0",
+            google_service_account_json="credentials-present",
+        )
+    )
+
+    assert store.configuration_status()["url"] == (
+        "https://docs.google.com/spreadsheets/d/example-sheet_123/edit"
+    )
+
+
 class FakeSMTP:
     sent_message = None
 
@@ -136,4 +151,3 @@ def test_weekly_email_contains_both_xlsx_attachments(test_settings, monkeypatch)
         "green_portfolio_all_articles_2026-09-14.xlsx",
     ]
     assert "New articles found: 4" in message.get_body(preferencelist=("plain",)).get_content()
-

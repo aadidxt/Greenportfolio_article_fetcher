@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -30,6 +31,22 @@ class GoogleSheetsStore:
     @property
     def enabled(self) -> bool:
         return self.settings.google_sheets_enabled
+
+    def public_url(self) -> str | None:
+        """Return a safe browser URL for the configured spreadsheet."""
+        sheet_ref = self.settings.google_sheet_id.strip()
+        if not sheet_ref:
+            return None
+
+        if sheet_ref.startswith(("http://", "https://")):
+            match = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]+)", sheet_ref)
+            if not match:
+                return None
+            sheet_ref = match.group(1)
+
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", sheet_ref):
+            return None
+        return f"https://docs.google.com/spreadsheets/d/{sheet_ref}/edit"
 
     def _credentials(self) -> dict[str, Any]:
         raw = self.settings.google_service_account_json.strip()
@@ -544,7 +561,12 @@ class GoogleSheetsStore:
 
     def configuration_status(self) -> dict[str, Any]:
         if not self.enabled:
-            return {"enabled": False, "configured": True, "message": "Local-only mode"}
+            return {
+                "enabled": False,
+                "configured": True,
+                "message": "Local-only mode",
+                "url": self.public_url(),
+            }
         configured = bool(
             self.settings.google_sheet_id and self.settings.google_service_account_json
         )
@@ -552,4 +574,5 @@ class GoogleSheetsStore:
             "enabled": True,
             "configured": configured,
             "message": "Ready" if configured else "Service-account credentials required",
+            "url": self.public_url(),
         }

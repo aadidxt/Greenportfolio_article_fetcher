@@ -115,6 +115,19 @@ The named `monitor-data` volume keeps SQLite state across restarts and redeploys
 
 For hosts that sleep, the optional GitHub Actions workflow calls `/api/jobs/weekly` at 03:30 UTC (09:00 IST). Add repository secrets `MEDIA_MONITOR_URL` and `MEDIA_MONITOR_ADMIN_KEY`, and set `SCHEDULER_ENABLED=false` on the deployed app so only one scheduler owns the run. The database lock also rejects overlapping fetch requests.
 
+### Keeping a free Render service warm
+
+Render Free web services spin down after 15 minutes without inbound traffic. The optional `render-keep-alive.yml` GitHub Actions workflow requests `/health` every 10 minutes. To enable it:
+
+1. In GitHub, open **Settings → Secrets and variables → Actions**.
+2. Add the repository secret `MEDIA_MONITOR_URL` with the public Render URL, for example `https://your-service.onrender.com` (no trailing path is needed). The weekly workflow uses this same secret.
+3. Add the repository variable `RENDER_KEEP_ALIVE_ENABLED` with the exact value `true`.
+4. Open **Actions → Keep Render service awake** and run it once with **Run workflow** to verify the URL.
+
+This is a best-effort workaround, not an availability guarantee. GitHub scheduled jobs can be delayed or dropped, and Render can restart Free instances. Continuous uptime consumes the workspace's Free instance hours; one always-running service fits within Render's current 750-hour monthly allowance, but multiple services might not. A paid Render instance is the reliable solution for production availability.
+
+Important: Render Free instances have an ephemeral filesystem. Keeping the process warm reduces spin-downs but does not make the SQLite file durable across restarts or deploys. Google Sheets remains durable, but production database state should use external persistent storage (or a paid persistent disk).
+
 ## Security notes
 
 - Set a long random `ADMIN_API_KEY`; it protects both manual and external scheduled fetch endpoints.

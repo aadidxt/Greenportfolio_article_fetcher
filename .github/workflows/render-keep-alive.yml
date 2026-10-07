@@ -1,0 +1,39 @@
+name: Keep Render service awake
+
+on:
+  schedule:
+    # Offset from the top of the hour to reduce GitHub Actions queue delays.
+    # Six requests per hour keeps the gap below Render's 15-minute idle window.
+    - cron: "7,17,27,37,47,57 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: render-keep-alive
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    # Opt in explicitly so forks and unconfigured repositories do not consume
+    # Actions minutes or continuously report failed scheduled runs.
+    if: ${{ vars.RENDER_KEEP_ALIVE_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      MEDIA_MONITOR_URL: ${{ secrets.MEDIA_MONITOR_URL }}
+    steps:
+      - name: Check configuration
+        if: ${{ env.MEDIA_MONITOR_URL == '' }}
+        run: |
+          echo "MEDIA_MONITOR_URL is not configured as a repository secret." >&2
+          exit 1
+
+      - name: Send heartbeat to Render
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --retry 2 --retry-delay 5 --retry-all-errors \
+            --connect-timeout 15 --max-time 120 \
+            --header "User-Agent: green-portfolio-render-heartbeat/1.0" \
+            "${MEDIA_MONITOR_URL%/}/health"

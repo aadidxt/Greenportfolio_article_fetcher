@@ -263,7 +263,15 @@ async function loadOverview() {
     }
 
     // System Status
-    const sheetReady = data.integrations.google_sheets.configured;
+    const sheetIntegration = data.integrations.google_sheets;
+    const sheetReady = sheetIntegration.configured;
+    const sheetLink = $("#google-sheet-link");
+    if (sheetLink && sheetIntegration.url) {
+      sheetLink.href = sheetIntegration.url;
+      sheetLink.hidden = false;
+    } else if (sheetLink) {
+      sheetLink.hidden = true;
+    }
     const searchReady = data.search_providers.length > 0;
     const statusLabel = data.last_fetch_status === "running"
       ? "Fetching"

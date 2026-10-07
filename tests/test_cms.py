@@ -128,6 +128,11 @@ def test_weekly_email_uses_active_recipients(test_settings, tmp_path):
 def test_admin_api_endpoints():
     client = TestClient(app)
 
+    health_resp = client.get("/health")
+    assert health_resp.status_code == 200
+    assert health_resp.json() == {"status": "ok"}
+    assert health_resp.headers["cache-control"] == "no-store"
+
     # Overview endpoint contains CMS fields
     overview_resp = client.get("/api/overview")
     assert overview_resp.status_code == 200

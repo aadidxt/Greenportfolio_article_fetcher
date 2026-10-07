@@ -201,7 +201,10 @@ def require_admin_key(x_admin_key: str = Header(default="")) -> None:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
+def health(response: Response) -> dict[str, str]:
+    # Heartbeat monitors must reach the application rather than reuse a cached
+    # response, otherwise Render can still consider the service idle.
+    response.headers["Cache-Control"] = "no-store"
     return {"status": "ok"}
 
 
@@ -545,4 +548,3 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("app.main:app", host=settings.app_host, port=settings.app_port, reload=True)
-
